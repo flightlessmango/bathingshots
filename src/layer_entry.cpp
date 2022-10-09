@@ -17,10 +17,15 @@
 #include "stbi/stb_image_write.h"
 #include "keyboard_input.hpp"
 
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include "control.h"
 #define LAYER_NAME "VK_LAYER_bathingshots"
 
 namespace nl
 {
+    static uint8_t raw_msg[1024] = {0};
+    struct bathingshots_v1 *ctrl_msg = (struct bathingshots_v1*) raw_msg;
     std::unordered_map<void*, LayerInstance*> g_instance_map;
     std::mutex                                g_instance_map_mutex;
     thread_local InstanceCache                t_instance_cache;
@@ -455,6 +460,17 @@ namespace nl
         delete layerSwapchain;
     }
 
+    void mq_thread(){
+        static uint8_t raw_msg[1024] = {0};
+        int key = ftok("bathingshots", 65);
+        int msgid = msgget(key, 0666 | IPC_CREAT);
+
+        while(true){
+            size_t msg_size = msgrcv(msgid, (void *) raw_msg, sizeof(raw_msg), 2, 0) + sizeof(long);
+            ctrl_msg = (struct bathingshots_v1*) raw_msg;
+            printf("%i\n", ctrl_msg->screenshot);
+        }
+    }
     VKAPI_ATTR VkResult VKAPI_CALL nl_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
     {
         auto layerDevice = getLayerDevice(queue);
@@ -477,8 +493,15 @@ namespace nl
             pressed = false;
         }
 
-        if (screenshot)
+        static bool inited_mq;
+
+        if (!inited_mq){
+            std::thread(mq_thread).detach();
+            inited_mq = true;
+        }
+        if (screenshot || ctrl_msg->screenshot)
         {
+            ctrl_msg->screenshot = false;
             assert(pPresentInfo->swapchainCount == 1);
             LayerSwapchain* layerSwapchain = getLayerSwapchain(layerDevice, pPresentInfo->pSwapchains[0]);
 
@@ -598,8 +621,8 @@ namespace nl
 
                 // TODO invalidate memory here?
 
-                stbi_write_png(
-                    "/tmp/screenshot.png", layerSwapchain->extent.width, layerSwapchain->extent.height, 4, data, layerSwapchain->extent.width * 4);
+                stbi_write_bmp(
+                    "/tmp/screenshot.bmp", layerSwapchain->extent.width, layerSwapchain->extent.height, 4, data);
                 layerDevice->vk.UnmapMemory(layerDevice->device, layerSwapchain->bufferMemory);
 
                 std::chrono::time_point<std::chrono::high_resolution_clock> end = std::chrono::high_resolution_clock::now();
@@ -611,6 +634,13 @@ namespace nl
                 micro_seconds = end - blit;
                 float cputime = micro_seconds.count();
                 Logger::info(std::to_string(gputime) + "µs shader vs " + std::to_string(cputime) + "µs cpu time");
+                int key = ftok("bathingshots", 65);
+                int msgid = msgget(key, 0666 | IPC_CREAT);
+                /* Create the message that we will send to mangohud */
+                struct bathingshots_v1 msg = {0};
+                msg.msg_type = 1;
+                msg.screenshot = true;
+                msgsnd(msgid, &msg, sizeof(bathingshots_v1), IPC_NOWAIT);
 
                 layerSwapchain->lock.store(0);
             };

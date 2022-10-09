@@ -26,3 +26,11 @@ shared_library(meson.project_name().to_lower(),
     link_args: '-fvisibility=hidden',
     install : lib_dir,
     )
+
+executable(
+    'control',
+    files(
+      'control.cpp',
+    ),
+    install : true
+  )
